@@ -16,9 +16,11 @@
  */
 package org.apache.dolphinscheduler.alert.runner;
 
+import com.baomidou.mybatisplus.core.toolkit.ObjectUtils;
 import org.apache.dolphinscheduler.alert.utils.Constants;
 import org.apache.dolphinscheduler.common.enums.AlertStatus;
 import org.apache.dolphinscheduler.common.plugin.PluginManager;
+import org.apache.dolphinscheduler.common.thread.ThreadUtils;
 import org.apache.dolphinscheduler.dao.AlertDao;
 import org.apache.dolphinscheduler.dao.entity.Alert;
 import org.apache.dolphinscheduler.dao.entity.User;
@@ -31,6 +33,8 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.stream.Collectors;
 
 /**
  * alert sender
@@ -38,47 +42,26 @@ import java.util.Map;
 public class AlertSender {
 
     private static final Logger logger = LoggerFactory.getLogger(AlertSender.class);
+    private final int THREADS_NUM = 5;
 
-    private List<Alert> alertList;
     private AlertDao alertDao;
     private PluginManager pluginManager;
+    private ExecutorService alertExecService;
 
-    public AlertSender() {
-    }
 
-    public AlertSender(List<Alert> alertList, AlertDao alertDao, PluginManager pluginManager) {
-        super();
-        this.alertList = alertList;
+    public AlertSender(AlertDao alertDao, PluginManager pluginManager) {
         this.alertDao = alertDao;
         this.pluginManager = pluginManager;
+        this.alertExecService = ThreadUtils.newDaemonFixedThreadExecutor("Alter-Execute-Thread", THREADS_NUM);
     }
 
-    public void run() {
-        List<User> users;
+    public void run(List<Alert> alertList) {
+        if (ObjectUtils.isEmpty(alertList)) {
+            return;
+        }
         Map<String, Object> retMaps = null;
         for (Alert alert : alertList) {
-            users = alertDao.listUserByAlertgroupId(alert.getAlertGroupId());
-
-            // receiving group list
-            List<String> receviersList = new ArrayList<>();
-            for (User user : users) {
-                receviersList.add(user.getEmail());
-            }
-
-            AlertData alertData = new AlertData();
-            alertData.setId(alert.getId())
-                    .setAlertGroupId(alert.getAlertGroupId())
-                    .setContent(alert.getContent())
-                    .setLog(alert.getLog())
-                    .setReceivers(alert.getReceivers())
-                    .setReceiversCc(alert.getReceiversCc())
-                    .setShowType(alert.getShowType().getDescp())
-                    .setTitle(alert.getTitle());
-
-            AlertInfo alertInfo = new AlertInfo();
-            alertInfo.setAlertData(alertData);
-
-            alertInfo.addProp("receivers", receviersList);
+            AlertInfo alertInfo = constructAlertInfo(alert);
 
             AlertPlugin emailPlugin = pluginManager.findOne(Constants.PLUGIN_DEFAULT_EMAIL);
             retMaps = emailPlugin.process(alertInfo);
@@ -93,8 +76,53 @@ public class AlertSender {
                 alertDao.updateAlert(AlertStatus.EXECUTION_SUCCESS, (String) retMaps.get(Constants.MESSAGE), alert.getId());
                 logger.info("alert send success");
             }
+            // call other plugins
+            sendAnotherPlugins(alertInfo);
         }
 
+    }
+
+    private void sendAnotherPlugins(AlertInfo alertInfo) {
+        // filter default plugin
+        List<AlertPlugin> alertPlugins = this.pluginManager.findAll().entrySet().stream()
+                .filter(entry -> !entry.getKey().equals(Constants.PLUGIN_DEFAULT_EMAIL))//
+                .map(Map.Entry::getValue)//
+                .collect(Collectors.toList());
+        for (AlertPlugin alertPlugin : alertPlugins) {
+            this.alertExecService.submit(() -> {
+                try {
+                    alertPlugin.process(alertInfo);
+                } catch (Exception e) {
+                    logger.error("Plugin: {} send alert: {} error: {}", alertPlugin.getName(), alertInfo.getAlertData(), e.getMessage());
+                }
+            });
+        }
+    }
+
+    private AlertInfo constructAlertInfo(Alert alert) {
+        List<User> users = alertDao.listUserByAlertgroupId(alert.getAlertGroupId());
+
+        // receiving group list
+        List<String> receiverList = new ArrayList<>();
+        for (User user : users) {
+            receiverList.add(user.getEmail());
+        }
+
+        AlertData alertData = new AlertData();
+        alertData.setId(alert.getId())
+                .setAlertGroupId(alert.getAlertGroupId())
+                .setContent(alert.getContent())
+                .setLog(alert.getLog())
+                .setReceivers(alert.getReceivers())
+                .setReceiversCc(alert.getReceiversCc())
+                .setShowType(alert.getShowType().getDescp())
+                .setTitle(alert.getTitle());
+
+        AlertInfo alertInfo = new AlertInfo();
+        alertInfo.setAlertData(alertData);
+
+        alertInfo.addProp("receivers", receiverList);
+        return alertInfo;
     }
 
 }

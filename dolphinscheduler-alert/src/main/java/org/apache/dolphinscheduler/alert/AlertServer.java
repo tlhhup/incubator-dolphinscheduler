@@ -59,6 +59,7 @@ public class AlertServer {
                 new FilePluginManager(PropertyUtils.getString(Constants.PLUGIN_DIR), whitePrefixes, excludePrefixes);
         // add default alert plugins
         alertPluginManager.addPlugin(new EmailAlertPlugin());
+        alertSender = new AlertSender(alertDao, alertPluginManager);
     }
 
     public synchronized static AlertServer getInstance() {
@@ -78,8 +79,7 @@ public class AlertServer {
                 Thread.currentThread().interrupt();
             }
             List<Alert> alerts = alertDao.listWaitExecutionAlert();
-            alertSender = new AlertSender(alerts, alertDao, alertPluginManager);
-            alertSender.run();
+            alertSender.run(alerts);
         }
     }
 
